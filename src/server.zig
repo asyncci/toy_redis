@@ -17,6 +17,7 @@ pub fn main() !void {
     const sock = try std.os.socket(std.os.AF.INET, std.os.SOCK.STREAM, 0);
     try std.os.setsockopt(sock, std.os.SOL.SOCKET, std.os.SO.REUSEADDR, &[_]u8{ 1, 0, 0, 0 });
     const addr = std.net.Address.initIp4([_]u8{ 0, 0, 0, 0 }, 1234);
+
     try outWriter.print("{any}\n", .{addr});
     try bufOut.flush();
 
@@ -25,9 +26,9 @@ pub fn main() !void {
     while (true) {
         var addr_accept: std.net.Ip4Address = undefined;
         var addr_size = addr_accept.getOsSockLen();
-        const conn_fd = try std.os.accept(sock, @ptrCast(&addr_accept.sa), &addr_size, 0);
+        const conn_fd = std.os.accept(sock, @ptrCast(&addr_accept.sa), &addr_size, 0) catch -1;
 
-        while (true) {
+        while (conn_fd != -1) {
             _ = readRequest(conn_fd) catch |err_result| {
                 try errWriter.print("connection from: {} -> {}\n", .{ addr_accept, err_result });
                 break;
@@ -35,10 +36,10 @@ pub fn main() !void {
             try sendRequest(conn_fd, "ola");
             try bufErr.flush();
             try bufOut.flush();
-            break;
         }
 
-        std.os.close(conn_fd);
+        if (conn_fd != -1)
+            std.os.close(conn_fd);
     }
 }
 

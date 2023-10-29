@@ -9,7 +9,8 @@ pub fn main() !void {
 
     while (true) {
         const message = try oneQuery(sock, "hwello");
-        _ = message;
+
+        std.debug.print("message: {s}\n", .{message});
 
         std.time.sleep(100000000);
     }
