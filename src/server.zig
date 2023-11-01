@@ -3,6 +3,7 @@ const variable = 10;
 const lib = @import("lib.zig");
 const readAll = lib.readAll;
 const writeAll = lib.writeAll;
+const Allocator = std.mem.Allocator;
 
 const out = std.io.getStdOut();
 const err = std.io.getStdErr();
@@ -14,50 +15,61 @@ var bufErr = std.io.bufferedWriter(err.writer());
 var errWriter = bufErr.writer();
 
 pub fn main() !void {
+    //create socket
     const sock = try std.os.socket(std.os.AF.INET, std.os.SOCK.STREAM, 0);
     try std.os.setsockopt(sock, std.os.SOL.SOCKET, std.os.SO.REUSEADDR, &[_]u8{ 1, 0, 0, 0 });
+
+    //bind ip address to socket
     const addr = std.net.Address.initIp4([_]u8{ 0, 0, 0, 0 }, 1234);
-
-    try outWriter.print("{any}\n", .{addr});
-    try bufOut.flush();
-
     try std.os.bind(sock, &addr.any, addr.getOsSockLen());
-    try std.os.listen(sock, 4096);
-    while (true) {
-        var addr_accept: std.net.Ip4Address = undefined;
-        var addr_size = addr_accept.getOsSockLen();
-        const conn_fd = std.os.accept(sock, @ptrCast(&addr_accept.sa), &addr_size, 0) catch -1;
 
-        while (conn_fd != -1) {
-            _ = readRequest(conn_fd) catch |err_result| {
-                try errWriter.print("connection from: {} -> {}\n", .{ addr_accept, err_result });
-                break;
+    try std.os.listen(sock, 4096);
+
+    //non blocking mode enable for initial socket -> sock
+    try lib.setNonBlock(sock);
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
+
+    var connections = lib.ConnectionsMap{};
+    defer connections.deinit(lib.server_lib.fb_allocator);
+
+    var poll_args = std.ArrayList(std.os.pollfd).init(allocator);
+    defer poll_args.deinit();
+
+    while (true) {
+        poll_args.clearRetainingCapacity();
+        //lazy socket
+        try poll_args.append(.{ .fd = sock, .events = std.os.POLL.IN, .revents = 0 });
+
+        var connectionsIt = connections.iterator();
+        while (connectionsIt.next()) |conn| {
+            const POLL = std.os.POLL;
+            const pfd: std.os.pollfd = .{
+                .fd = conn.key_ptr.*,
+                .events = if (conn.value_ptr.state == .Request) POLL.IN else POLL.OUT,
+                .revents = 0,
             };
-            try sendRequest(conn_fd, "ola");
-            try bufErr.flush();
-            try bufOut.flush();
+            try poll_args.append(pfd);
         }
 
-        if (conn_fd != -1)
-            std.os.close(conn_fd);
+        std.debug.print("size: {}\n", .{poll_args.items.len});
+        _ = try std.os.poll(poll_args.items, 1000);
+
+        const nonLazy = poll_args.items[1..];
+        for (nonLazy) |pfd| {
+            var conn = connections.getPtr(pfd.fd);
+            if (conn) |connection| {
+                try lib.server_lib.connectionIO(pfd.fd, connection);
+
+                if (connection.state == .End) {
+                    std.os.close(pfd.fd);
+                    _ = connections.swapRemove(pfd.fd);
+                }
+            }
+        }
+
+        if (poll_args.items[0].revents > 0)
+            try lib.server_lib.newConnection(poll_args.items[0].fd, &connections);
     }
-}
-
-fn readRequest(fd: i32) ![]const u8 {
-    var rbuf = std.mem.zeroes([4 + lib.maxMsg + 1]u8);
-    try readAll(fd, &rbuf, 4);
-    var len: u32 = @bitCast(rbuf[0..4].*);
-    if (len > lib.maxMsg) return error.TooLong;
-    try outWriter.print("len: {}\n", .{len});
-
-    try readAll(fd, rbuf[4..], len);
-    try outWriter.print("text: {s}\n", .{rbuf[4..(4 + len)]});
-    return rbuf[4 .. 4 + len];
-}
-
-fn sendRequest(fd: i32, comptime reply: []const u8) !void {
-    var wbuf = std.mem.zeroes([4 + reply.len]u8);
-    @memcpy(wbuf[0..4], @as(*const [4]u8, @ptrCast(&reply.len)));
-    @memcpy(wbuf[4..], reply);
-    try writeAll(fd, &wbuf);
 }
